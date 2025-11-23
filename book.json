@@ -1,0 +1,20 @@
+{
+  "title": "RAGDao",
+  "description": "一本基于 GitBook 的开源书项目",
+  "author": "Your Name",
+  "language": "zh-hans",
+  "root": ".",
+  "structure": {
+    "readme": "README.md",
+    "summary": "SUMMARY.md"
+  },
+  "plugins": [
+    "highlight",
+    "search-plus"
+  ],
+  "pluginsConfig": {
+    "search-plus": {
+      "maxIndexSize": 100000
+    }
+  }
+}

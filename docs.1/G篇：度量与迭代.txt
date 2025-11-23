@@ -1,0 +1,222 @@
+# === G篇：度量与迭代/G2：AB测试和实验 (AB Testing & Experimentation).md ===
+
+# A/B测试和实验 (A/B Testing & Experimentation)
+
+离线评估（使用测试集）非常适合快速迭代，但它无法完全模拟真实世界中用户行为的多样性。A/B测试，是在生产环境中，将不同的系统版本（例如，版本A vs. 版本B）同时推送给不同的用户群体，然后通过收集真实的用户行为数据，来科学地判断哪个版本更好。
+
+- **[图片建议]:** 一张示意图，展示用户流量被一个分流器分成了50%和50%，分别导向服务器A（运行旧Prompt）和服务器B（运行新Prompt），然后两个服务器的日志和用户行为数据都被送入一个数据分析平台进行对比。
+- **巧妙设计——“影子模式” (Shadow Mode):**
+    - **类比：** 这就像让一位**实习飞行员**在**模拟器**中飞行。他会接收到和真实飞机完全一样的指令和环境数据，并做出操作。系统会记录下他的所有操作和飞行结果，但他的操作不会对真实的飞机产生任何影响。
+    - **优点：** 可以在不影响任何用户体验的情况下，大规模地收集新版本的性能数据和输出日志，提前发现潜在的问题，大大降低了正式A/B测试的风险。
+
+## **为何需要线上测试**
+
+离线评估（使用测试集）无法完全模拟真实世界中用户行为的多样性和复杂性。A/B测试是在生产环境中，通过真实的用户行为数据，来科学地判断哪个系统版本更好的“金标准”。
+
+## **实施A/B测试的关键步骤**
+
+- **设立明确假设:** 例如，“新的Prompt B能够比旧的Prompt A，将用户‘点踩’的比例降低10%”。
+- **流量随机分割:** 将用户流量随机、均匀地分配到A组（对照组）和B组（实验组）。
+- **收集数据并进行统计分析:** 确保实验运行足够长的时间以达到统计显著性。
+
+## **高级策略：影子模式**
+
+- **概念说明:** 在正式进行A/B测试前，可以先以“影子模式”部署新版本。即，新版本B与旧版本A同时处理线上请求，但只有A的返回结果会呈现给用户。系统会默默记录下B版本的输出。
+- **类比:** 就像让一位**实习飞行员**在**模拟器**中飞行。他的操作不会对真实的飞机产生任何影响，但可以让我们在绝对安全的情况下，评估他的驾驶水平。
+
+# === G篇：度量与迭代/G3：反馈回路 (Feedback Loop)——让用户成为你的“老师”.md ===
+
+# G3：反馈回路 (Feedback Loop)——让用户成为你的“老师”
+
+最真实的评估，来自于最终用户。建立一个有效的反馈回路，意味着为用户提供方便的渠道来表达他们对系统输出的看法，并将这些宝贵的信号系统性地收集、分析，并用于指导系统的持续改进。
+
+- **反馈机制的类型：**
+    - **显式反馈 (Explicit Feedback):** “顶/踩”按钮、五星评分。信号明确，质量高。
+    - **隐式反馈 (Implicit Feedback):** 用户是否**复制**了答案内容？（积极信号）；用户是否**追问**了问题？（消极信号）。数据量大，但有噪音。
+- **巧妙设计——“反馈驱动的微调数据” (Feedback-driven Fine-tuning Data):**
+    - **类比：** 这就像一个**学生**交上作业后，**老师**（用户）批改了作业（**反馈**），指出了错误的地方。学生（系统）拿回作业本，不仅知道了对错，还把所有错题整理到了一个**错题本**里（**构建偏好数据集**）。下次考试前，他会专门复习这个错题本（**进行DPO微调**），确保不再犯同样的错误。
+    - **核心流程：**
+    
+    ```mermaid
+    flowchart TD
+        A[用户使用RAG系统] --> B{用户给出'踩'反馈};
+        B --> C["收集'坏'的问答对<br>(Query, Context, Bad_Answer)"];
+        C --> D{人工或LLM修正};
+        D --> E["生成'好'的答案<br>(Good_Answer)"];
+        E --> F[构建偏好数据集<br>chosen: Good_Answer<br>rejected: Bad_Answer];
+        F --> G{使用DPO等技术微调LLM};
+        G --> H[部署微调后的新模型];
+        H --> A;
+    ```
+    
+    > DPO（Direct Preference Optimization）由斯坦福大学的研究人员在2023年的论文 "Direct Preference Optimization: Your Language Model is Secretly a Reward Model" 中提出，是一种比传统的基于强化学习的RLHF更简单、更稳定的模型对齐方法。
+    > 
+
+[**G3：反馈回路** v2](https://www.notion.so/G3-v2-26055a58d45c8037a335c6f21c75d43e?pvs=21)
+
+# === G篇：度量与迭代/G1：综合评估指标 (Comprehensive Evaluation Metrics)——RAG系统的“体检报告”.md ===
+
+# G1：综合评估指标 (Comprehensive Evaluation Metrics)——RAG系统的“体检报告”
+
+对RAG系统的评估是一个多维度的任务，因为它本质上由两个核心组件构成：**检索器（Retriever）和生成器（Generator）**。因此，我们的评估指标也必须能分别（或综合）地考察这两个组件的性能。这就像给一个**学生**做一次全面的**体检**。
+
+- **检索质量指标** 就像是检查他的**“视力”**。他的眼睛（检索器）能否在书本中快速、准确地找到知识点？
+- **生成质量指标** 就像是检查他的**“大脑和口才”**。他（生成器）能否基于找到的知识点，进行清晰、准确、有逻辑的论述？
+
+## **检索质量指标 (Retrieval Quality Metrics)**
+
+- **详细阐述：** 这部分指标专注于评估检索器找回的上下文（Context）的质量。
+- **核心指标：**
+    - **上下文精确率 (Context Precision):** 找回的文档中，有多少是真正相关的？（视力是否清晰，杂光少？）
+    - **上下文召回率 (Context Recall):** 所有应该被找回的相关文档，我们找回了多少？（视野是否开阔，不漏掉东西？）
+
+## **生成质量指标 (Generation Quality Metrics)**
+
+- **详细阐述：** 这部分指标评估LLM在给定上下文后，生成的答案本身的质量。
+- **核心指标 (以RAGAS框架为代表):**
+    - **忠实度 (Faithfulness):** 答案是否完全基于所提供的上下文？有没有“说谎”或“幻觉”？（是否诚实？）
+    - **答案相关性 (Answer Relevancy):** 答案是否直接、有效地回应了用户的原始问题？（是否跑题？）
+    - **答案正确性 (Answer Correctness):** 答案的内容是否事实准确？（知识是否正确？）
+
+## **端到端自动化评估框架**
+
+- **RAGAS (Retrieval-Augmented Generation Assessment):**
+    - **概念出处：** RAGAS由Exploding Gradients、Langchain和Upstage AI的研究人员于2023年提出，论文为 "RAGAS: Automated Evaluation of Retrieval Augmented Generation"。它已迅速成为RAG评估领域的标准框架之一。
+    - **工作原理：** 巧妙地利用强大的LLM（如GPT-3.5/4）自身作为评估者（裁判），来自动化地计算上述大部分指标。
+- **可执行代码示例 (使用RAGAS进行评估):**
+
+```python
+# 准备环境:
+# pip install ragas datasets openai
+# 请确保你已经设置了OpenAI的API Key环境变量:
+# export OPENAI_API_KEY='sk-...'
+
+from datasets import Dataset
+from ragas import evaluate
+from ragas.metrics import (
+    faithfulness,
+    answer_relevancy,
+    context_recall,
+    context_precision,
+)
+import os
+
+# 检查API密钥是否存在
+if "OPENAI_API_KEY" not in os.environ:
+    print("ERROR: OpenAI API key not found. Please set the OPENAI_API_KEY environment variable.")
+else:
+    # 1. 准备评估数据集
+    #    这是评估的核心，你需要准备一个包含以下字段的测试集：
+    #    - question: 用户的提问
+    #    - answer: 你的RAG系统生成的答案
+    #    - contexts: 你的RAG系统为生成该答案而检索到的文档块列表
+    #    - ground_truth: (用于评估答案正确性) 一个由人工编写的、标准的黄金答案
+    data_samples = {
+        'question': [
+            "What is the capital of France?", 
+            "Who wrote 'To Kill a Mockingbird'?"
+        ],
+        'answer': [
+            "Paris is the capital of France.", 
+            "The author of 'To Kill a Mockingbird' is Harper Lee."
+        ],
+        'contexts': [
+            ['Paris is the capital and most populous city of France.', 'France is a country in Western Europe.'], 
+            ['Harper Lee was an American novelist best known for her 1960 novel To Kill a Mockingbird.', 'The book is widely taught in schools in the United States.']
+        ],
+        'ground_truth': [
+            "The capital of France is Paris.", 
+            "Harper Lee wrote 'To Kill a Mockingbird'."
+        ]
+    }
+    dataset = Dataset.from_dict(data_samples)
+
+    # 2. 运行评估
+    #    RAGAS会为数据集中的每一行，调用LLM作为裁判来计算各项指标的分数。
+    print("Starting RAGAS evaluation...")
+    result = evaluate(
+        dataset=dataset,
+        metrics=[
+            faithfulness,       # 答案是否忠于上下文
+            answer_relevancy,   # 答案是否与问题相关
+            context_precision,  # 检索到的上下文的相关性比例
+            context_recall,     # 检索到的上下文覆盖了多少应有的信息
+        ],
+        # is_async=True # 如果数据集很大，可以开启异步模式加速
+    )
+    print("Evaluation complete.")
+
+    # 3. 查看并解释结果
+    print("\n--- RAGAS Evaluation Results ---")
+    # result是一个字典，包含了每个指标的平均分
+    print(result)
+
+    # 将结果转换为更易读的DataFrame
+    df = result.to_pandas()
+    print("\n--- Detailed Results (DataFrame) ---")
+    print(df.head())
+    # 输出的DataFrame会展示每一条数据的各项指标得分，便于分析具体案例。
+```
+
+## **系统性能指标 (System Performance Metrics)**
+
+- **端到端延迟 (End-to-End Latency):** 从用户提问到返回答案的总时间。
+- **吞吐量 (Throughput):** 系统每秒能处理的请求数。
+- **资源利用率:**
+- **错误率和可用性:**
+
+[**G1：综合评估指标** v2](https://www.notion.so/G1-v2-26055a58d45c80fdb253d3f203a294f6?pvs=21)
+
+# === G篇：度量与迭代/G0：开篇，评估与持续改善.md ===
+
+# 开篇：评估与持续改善
+
+一个RAG系统上线运行，仅仅是其生命周期的开始。如何知道它在真实世界中的表现如何？我们的某项优化（例如，更换嵌入模型、调整Prompt）是带来了积极的改进，还是无意中引入了新的问题？
+
+这就像**驾驶一艘现代帆船**。你不能只凭感觉来调整帆的角度。你需要依赖各种**仪表**：风速计告诉你风力变化，GPS告诉你航向是否偏离，速度计告诉你当前的航速。没有这些**度量**，你所有的调整都是盲目的。一个无法被度量的系统，也无法被有效地改进。
+
+评估是连接“开发”与“运营”、“理论”与“实践”的桥梁。它为我们提供了一面“仪表盘”，客观地反映出系统的优点和短板，并指导我们进行数据驱动的决策。本章将作为您的“**仪表盘使用与导航手册**”，深入探讨RAG评估的三大支柱：**综合评估指标**、**A/B测试与实验**以及**反馈回路**。
+
+```mermaid
+graph TD
+    subgraph "持续改进的飞轮"
+        A[RAG 系统 v1.0] --> B{G1: 综合评估};
+        B -- "发现问题/机会" --> C{G2: A/B测试};
+        C -- "验证改进" --> D[部署 RAG 系统 v1.1];
+        D --> E{G3: 收集用户反馈};
+        E -- "新的数据/洞察" --> B;
+        
+        subgraph "G1: 综合评估 (离线)"
+            B1["检索质量指标<br>(Context Precision/Recall)"]
+            B2["生成质量指标<br>(Faithfulness, Answer Relevancy)"]
+            B3["自动化评估框架 (RAGAS)"]
+        end
+        
+        subgraph "G2: A/B测试 (线上)"
+            C1[流量分割]
+            C2[对比业务指标]
+        end
+
+        subgraph "G3: 反馈回路 (持续)"
+            E1["显式反馈 (顶/踩)"]
+            E2["隐式反馈 (用户行为)"]
+            E3[反馈驱动微调]
+        end
+        
+        B --> B1 & B2 & B3
+        C --> C1 & C2
+        E --> E1 & E2 & E3
+    end
+```
+
+[**G1：综合评估指标 (Comprehensive Evaluation Metrics)——RAG系统的“体检报告”**](https://www.notion.so/G1-Comprehensive-Evaluation-Metrics-RAG-26055a58d45c8076b1e4cca13d67685c?pvs=21)
+
+[**G2：A/B测试和实验 (A/B Testing & Experimentation)**](https://www.notion.so/G2-A-B-A-B-Testing-Experimentation-26055a58d45c807c8554d34d5c8021a4?pvs=21)
+
+[**G3：反馈回路 (Feedback Loop)——让用户成为你的“老师”**](https://www.notion.so/G3-Feedback-Loop-26055a58d45c800b96c8fae893c5fc1b?pvs=21)
+
+- Es, S., E. J. van, L. de Vreese, & M. de Rijke. (2023). RAGAS: Automated Evaluation of Retrieval Augmented Generation. *arXiv preprint arXiv:2309.15217*.
+- Lin, C. Y. (2004). ROUGE: A Package for Automatic Evaluation of Summaries. *Proceedings of the ACL-04 Workshop*.
+- Papineni, K., Roukos, S., Ward, T., & Zhu, W. J. (2002). BLEU: a Method for Automatic Evaluation of Machine Translation. *Proceedings of the 40th Annual Meeting of the Association for Computational Linguistics (ACL)*.
+- Zhang, T., Kishore, V., Wu, F., Weinberger, K. Q., & Artzi, Y. (2019). BERTScore: Evaluating Text Generation with BERT. *arXiv preprint arXiv:1904.09675*.
+

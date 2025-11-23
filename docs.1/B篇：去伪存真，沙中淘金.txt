@@ -1,0 +1,365 @@
+# === B篇：去伪存真，沙中淘金/B2：混合检索方法——集各家之所长.md ===
+
+# B2：混合检索方法——集各家之所长
+
+单一的检索方法总有其盲点。语义检索（密集）擅长理解意图，但可能忽略具体关键词；关键词检索（稀疏）能精确匹配术语，却不懂同义词。混合检索（Hybrid Search）就是将这两种方法结合，实现1 + 1 > 2的效果。
+
+## **实施重新排序 (Rerank)——两阶段检索策略**
+
+- **详细阐述：** 这是提升检索**精度**的“杀手锏”。想象在大海里**捞鱼**。
+    1. **第一阶段（召回）：** 你先用一张**大网（ANN或BM25）**，迅速地捞起一大堆东西，里面有鱼、有虾，也有水草和石头。此阶段的目标是“快”和“全”，保证目标鱼都在网里。
+    2. **第二阶段（重排）：** 然后，你在船上，用**双手（交叉编码器）**，把捞上来的东西一件一件地仔细检查，挑出真正想要的鱼，然后按照大小、品质排好序。此阶段的目标是“准”和“精”。
+- **核心模型——交叉编码器 (Cross-Encoder):**
+    - **工作原理：** 它将查询和文档**拼接**在一起（[CLS] query [SEP] document [SEP]），然后像一个情感分类模型一样，对这个“拼接句”的相关性进行打分。由于它能同时“看到”查询和文档的全部内容，可以捕捉到更细微的词语交互，因此其排序精度远高于标准的嵌入模型（双编码器）。
+- **重排策略的实践考量：**
+    - **候选集大小 (Candidate Set Size):** 召回多少文档送入重排器是一个关键的权衡。通常在 k=50 到 k=100 之间。太小，可能在召回阶段就漏掉了正确答案；太大，会显著增加重排阶段的延迟。
+    - **模型的选择:**
+        - **轻量级模型：** ms-marco-MiniLM-L-6-v2 等模型速度快，适合对延迟要求高的在线场景。
+        - **重量级模型：** bge-reranker-large, Cohere Rerank 等模型精度更高，但计算成本也更高，可能适用于离线任务或对质量要求极高的场景。
+    - **微调重排器 (Fine-tuning a Reranker)：**与微调嵌入模型类似，你也可以在自己的领域数据上微调重排器。重排器的微调通常更简单，因为它是一个分类任务（判断[query, doc]对是否相关）。你需要的数据集是 (query, relevant_doc) 和 (query, irrelevant_doc) 对。微调后的重排器能更精准地理解你所在领域的“相关性”。
+- **可执行代码示例 (使用sentence-transformers的Cross-Encoder):**
+
+```python
+# 准备环境:
+# pip install sentence-transformers torch
+
+from sentence_transformers.cross_encoder import CrossEncoder
+
+# 1. 加载一个预训练的重排模型
+# ms-marco-MiniLM-L-6-v2 是一个在微软MS MARCO数据集上训练的、轻量且高效的模型。
+print("Loading Cross-Encoder model...")
+reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+print("Model loaded.")
+
+# 2. 假设这是第一阶段召回的结果
+query = "What is the capital of France?"
+# 召回的文档可能语义相关，但精确度不一
+retrieved_documents = [
+    "The Eiffel Tower is located in Paris.", # 相关但非直接答案
+    "Berlin is the capital of Germany.", # 不相关
+    "France is a country in Western Europe. Paris serves as its capital, a major global center for art and fashion.", # 最佳答案
+    "Paris is a beautiful city." # 相关但信息量不足
+]
+
+# 3. 准备输入对：[查询, 文档]
+sentence_pairs = [[query, doc] for doc in retrieved_documents]
+
+# 4. 使用 reranker.predict() 计算每个对的相关性分数
+# 分数越高，表示相关性越强。
+print("\nCalculating reranking scores...")
+scores = reranker.predict(sentence_pairs)
+
+# 5. 将分数与文档配对，并按分数降序排序
+scored_docs = sorted(zip(scores, retrieved_documents), reverse=True)
+
+print("\n--- Results after Reranking ---")
+for score, doc in scored_docs:
+    # 使用 f-string 格式化输出，确保对齐
+    print(f"Score: {score:9.4f}\t Document: {doc}")
+```
+
+## **使用查询扩展技术 (Query Expansion)**
+
+用户输入的查询往往很短，或用词不一（“RAG效果不好” vs. “如何提升检索增强生成系统的准确率”）。查询扩展旨在用更丰富、更多样的表达方式来“重写”或“扩展”原始查询，以提高召回率。
+
+- **巧妙设计——LLM即扩展器：** 利用一个LLM（可以是系统中的生成模型，也可以是一个更小更快的模型），根据用户的原始查询，生成多个变体查询。然后将原始查询和这些生成的查询**一起**发送给检索器，将所有结果汇总后进行去重和重排。
+
+### **查询扩展的多种方法：**
+
+- **LLM生成变体 (LLM-based Expansion):**
+    - **说明：** 这是最灵活、最强大的方法。利用LLM生成多个语义相似但表述不同的查询。
+    - **风险：** **查询漂移 (Query Drift)**，即生成的查询偏离了用户的原始意图。
+- **Multi-Query Retriever：**这是LangChain等框架中封装好的一种策略。它使用LLM根据用户输入，一次性生成多个**不同视角**的查询。例如，对于查询“RAG的优缺点”，LLM可能生成：“RAG的优点是什么？”、“RAG的缺点是什么？”、“RAG适合什么场景？”。然后对这些子查询并行检索，合并结果。
+- **引用历史查询 (Pseudo-Relevance Feedback):**
+    - **说明：** 一种经典的、无需LLM的扩展技术。
+    - **流程：**
+        1. 用原始查询进行第一次检索。
+        2. 假设排名最前的1-2个文档是高度相关的。
+        3. 从这1-2个文档中提取出最重要、最独特的关键词。
+        4. 将这些关键词**添加**到原始查询中，形成一个更长、更具体的新查询，然后进行第二次检索。
+    - **优点：** 简单、快速，不增加外部API调用成本。
+
+# === B篇：去伪存真，沙中淘金/B0：开篇，提高检索质量.md ===
+
+# 开篇：提高检索质量
+
+如果说A篇的数据准备是为RAG系统提供了“纯净的弹药库”，那么本篇将要探讨的检索质量，则是为系统装上了一双锐利的“鹰眼”。这双眼睛必须能够在浩瀚如海的知识库中，于万千信息里，精准地锁定与用户意图最为契合的“猎物”，并以迅雷不及掩耳之势将其捕获。
+
+一个拥有“鹰眼”的检索器，能为后续的语言模型提供高信噪比、高相关度的上下文，使其能够从容地组织和生成答案。相反，一个“近视”的检索器，只会抓来一堆杂草（不相关信息），迫使语言模型在垃圾堆里找线索，最终的结果要么是胡言乱语（幻觉），要么是答非所问。
+
+本章将作为您的“鹰眼训练手册”，我们将从“引擎”本身出发，学习一系列高级的“炼金术”，旨在从沙中淘出真金，显著提升检索的精准度（Precision）和召回率（Recall）。本章将聚焦于四大核心策略：**高级嵌入技术**、**混合检索方法**、**上下文检索**以及**多样性与相关性的平衡**。
+
+```mermaid
+graph TD
+    subgraph "提升检索质量的核心策略"
+        A[用户查询] --> B{检索流程};
+        B --> C[B1: 高级嵌入技术];
+        C --> C1[更换/微调嵌入模型];
+        C --> C2[多模态嵌入];
+        B --> D[B2: 混合检索方法];
+        D --> D1["密集+稀疏检索 (RRF融合)"];
+        D --> D2["实施重排 (Reranker)"];
+        D --> D3[查询扩展];
+        B --> E[B3: 上下文检索];
+        E --> E1[对话历史重写];
+        E --> E2[复杂查询分解];
+        B --> F[B4: 多样性与相关性];
+        F --> F1[使用MMR算法];
+        
+        G[高质量上下文] --> H[送往LLM生成];
+        
+        C1 --> B;
+        D1 --> B;
+        E1 --> B;
+        F1 --> B;
+
+    end
+
+```
+
+## 目录：
+
+[**B1：高级嵌入技术——把握语义的核心**](https://www.notion.so/B1-26055a58d45c801ba749fb9c539dcae0?pvs=21)
+
+[**B2：混合检索方法——集各家之所长**](https://www.notion.so/B2-26055a58d45c80919fe0ca89b3bab9bc?pvs=21)
+
+[**B3：上下文检索——理解对话的流动**](https://www.notion.so/B3-26055a58d45c80aebeb8fb921fa827df?pvs=21)
+
+[**B4：多样性与相关性的平衡——避免信息茧房**](https://www.notion.so/B4-26055a58d45c8053a0ebd66bf67c96c0?pvs=21)
+
+### **引用文献 (References)**
+
+- Humeau, S., Shuster, K., Lachaux, M. A., & Weston, J. (2019). Poly-encoders: Transformer Architectures and Pre-training Strategies for Fast and Accurate Multi-sentence Scoring. *arXiv preprint arXiv:1905.01969*.
+- Lewis, P., Perez, E., Piktus, A., Petroni, F., Karpukhin, V., Goyal, N., ... & Kiela, D. (2020). Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks. *Advances in Neural Information Processing Systems, 33*, 9459-9474.
+- Nogueira, R., & Cho, K. (2019). Passage Re-ranking with BERT. *arXiv preprint arXiv:1901.04085*.
+- Radford, A., Kim, J. W., Hallacy, C., Ramesh, A., Goh, G., Agarwal, S., ... & Sutskever, I. (2021). Learning Transferable Visual Models From Natural Language Supervision. *International Conference on Machine Learning (ICML)*.
+- Santhanam, K., Khattab, O., Saad-Falcon, J., & Potts, C. (2021). ColBERTv2: Effective and Efficient Passage Search via Late Interaction. *arXiv preprint arXiv:2112.01488*.
+
+# === B篇：去伪存真，沙中淘金/B3：上下文检索——理解对话的流动.md ===
+
+# B3：上下文检索——理解对话的流动
+
+在真实的对话场景（如聊天机器人）中，问题之间存在着紧密的联系。如果检索系统无法理解对话的上下文，就会出现答非所问的情况。这就像和一个**记性不好**的朋友聊天。
+
+```
+你：“我最近在看《三体》。”
+朋友：“哦。”
+你：“你觉得里面哪个角色最酷？”
+朋友（记性不好）：“什么里面？哪个角色？”
+```
+
+一个没有上下文意识的RAG系统，就像这个朋友一样，它只听得到你最后那句“你觉得里面哪个角色最酷？”，完全不知道“里面”指的是什么。
+
+## **实现对话上下文跟踪**
+
+核心思想是**查询重写（Query Rewriting）**。当用户提出一个代词模糊或依赖前文的问题时（例如，在讨论完“RAG”后，用户问“它有什么缺点？”），系统需要结合对话历史，将当前问题改写成一个独立的、完整的查询。
+
+- **查询重写的挑战与对策：**
+    - **别何时需要重写:** 并非所有多轮对话都需要重写。如果用户的新问题本身已经是一个完整的句子，那么重写反而是多余的。可以加入一个**判断步骤**：先让LLM判断当前问题是否依赖于历史记录，如果依赖，再执行重写。
+    - **保持意图一致:** 重写后的查询必须忠实于用户的原始意图。这需要高质量的Prompt和可能对重写模型进行的微调。
+- **可执行代码示例 (使用LLM进行查询重写 - 概念性):**
+
+```python
+# 这是一个概念性的示例，需要一个能调用的LLM API
+# 假设你有一个名为 call_llm_api 的函数
+
+def rewrite_query_with_history(chat_history: list, current_question: str) -> str:
+    """使用LLM根据聊天历史重写当前问题"""
+
+    if not chat_history:
+        return current_question
+
+    # 构建一个清晰的Prompt
+    history_str = "\n".join([f"User: {turn['user']}\nAI: {turn['ai']}" for turn in chat_history])
+    
+    prompt = f"""
+		You are a query rewriting expert. Your task is to rewrite a follow-up question into a standalone, self-contained question based on the provided chat history. The rewritten question must be understandable without the context of the chat history.
+		<Chat History>
+		{history_str}
+		</Chat History>
+		<Follow-up Question>
+		{current_question}
+		</Follow-up Question>
+		<Rewritten Standalone Question>
+		"""
+		# 在真实应用中，这里会调用LLM API
+		# rewritten_question = call_llm_api(prompt)
+		# --- 模拟LLM的输出 ---
+    if "disadvantages" in current_question.lower() and "rag" in chat_history[-1]["ai"].lower():
+        rewritten_question = "What are the main disadvantages of Retrieval-Augmented Generation (RAG)?"
+    else:
+        rewritten_question = current_question
+    # --- 结束模拟 ---
+        
+    return rewritten_question
+
+# --- 示例用法 ---
+chat_history = [
+    {"user": "What is RAG?", "ai": "RAG stands for Retrieval-Augmented Generation."}
+]
+follow_up = "What are its main disadvantages?"
+
+standalone_query = rewrite_query_with_history(chat_history, follow_up)
+
+print(f"Original follow-up: {follow_up}")
+print(f"Rewritten standalone query: {standalone_query}")
+# 这个 standalone_query 才是应该被送入检索器的查询
+```
+
+## **处理复杂查询：查询分解 (Query Decomposition)**
+
+当用户提出一个包含多个子问题或需要比较的复杂问题时（例如，“请比较BM25和向量检索在RAG中的优缺点”），直接对整个长查询进行检索效果可能不佳。查询分解就是先用LLM将复杂问题拆解成多个更简单、更原子化的子问题。
+
+- **执行流程:**
+    1. **分解 (Decompose):** LLM将复杂查询分解成一个子问题列表。
+    2. **并行检索 (Retrieve in Parallel):** 对每个子问题**独立地、并行地**执行检索。
+    3. **合并与生成 (Synthesize):** 将所有子问题的检索结果汇总起来，作为一个更丰富的上下文，提供给最终的生成模型，让它综合这些信息来回答最初的复杂问题。
+- **优点:**
+    - **提高召回率：** 每个子查询都更集中，更容易命中与之精确相关的文档块。
+    - **逻辑更清晰：** 为LLM提供了结构化的、多角度的信息，有助于生成更有条理的答案。
+
+# === B篇：去伪存真，沙中淘金/B4：多样性与相关性的平衡——避免信息茧房.md ===
+
+# B4：多样性与相关性的平衡——避免信息茧房
+
+有时，最相关的Top-K个文档可能内容高度同质化，反复陈述同一个事实或观点。这虽然“相关”，但信息量很低。为了给用户提供更全面、更多维度的视角，需要在检索结果中引入多样性。
+
+## **最大边际相关性 (MMR - Maximal Marginal Relevance):**
+
+MMR由Jaime Carbonell等人在1998年的SIGIR会议论文 "Use of MMR, diversity-based reranking for reordering documents and producing summaries" 中首次提出，是信息检索领域平衡相关性与新颖性的经典算法。
+
+- **工作原理（直观理解）：**
+    1. 首先，像往常一样检索出一个较大的候选集。
+    2. **第一步：** 选出与查询最相关的那个文档。
+    3. **迭代步骤：** 在剩下的文档中，寻找一个“最优”的文档，这个“最优”的文档需要满足：既与**原始查询**的相关性要高，又与**已经选出**的文档的相似性要低（即，它要足够“新颖”）。
+- **参数 lambda:** lambda参数（0到1之间）用于调节“相关性”和“多样性”的权重。lambda=1时，只考虑相关性；lambda=0时，只考虑多样性。
+
+### **MMR的适用场景:**
+
+- **当查询开放且需要多方面视角时：** 例如，用户查询“人工智能对社会的影响”，你希望返回的结果既包含积极影响（如效率提升），也包含消极影响（如就业问题），而不是5篇都在说效率提升的文档。
+- **产品推荐或新闻摘要：** 在这些场景中，向用户展示多样化的选择或新闻角度，通常比反复推荐同一种产品或报道同一个事件要好。
+- **何时不适用：** 当用户进行非常精确的事实查找时（例如，“法国的首都是哪里？”），多样性通常是不需要的，此时应将lambda参数设为接近1，以追求最高的相关性。
+
+# === B篇：去伪存真，沙中淘金/B1：高级嵌入技术——把握语义的核心.md ===
+
+# B1：高级嵌入技术——把握语义的核心
+
+嵌入模型（Embedding Model）是语义检索的“引擎”，它负责将人类的语言（文本）转化为机器能够理解的数学语言（向量）。这个转化过程的质量，直接决定了语义空间的好坏。想象一个巨大的**宇宙星图**，每一颗星星都代表一段文本。一个优秀的嵌入模型，就像一位**智慧的天文学家**，他绘制的星图应该具备以下特点：
+
+- **星系聚集：** 语义上相似的文本（例如，所有关于“苹果公司财务报告”的段落），在星图上会聚集在一起，形成一个紧密的“星系”。
+- **星系分明：** 不同主题的文本（例如，“苹果公司”和“苹果派食谱”），在星图上会相距遥远，分属于不同的“星系”。
+- **精细辨认：** 即便是同一个星系内部，它也能区分出细微的差别（例如，“2024年Q4财报”和“2025年Q1财报”的星星会很近，但不会完全重合）。
+
+## **尝试不同的嵌入模型**
+
+不存在一个“放之四海而皆准”的完美嵌入模型。不同的模型在不同的语言、领域和任务上表现各异。选择的起点应该是权威的排行榜和对自身任务的理解。
+
+- **MTEB排行榜简介：**
+    - MTEB（Massive Text Embedding Benchmark）是一个由社区驱动的、全面的文本嵌入模型评估基准，由Hugging Face等机构的研究人员于2022年提出。它已成为评估和比较嵌入模型的行业标准。您可以在Hugging Face上找到[MTEB排行榜](https://huggingface.co/spaces/mteb/leaderboard)。在排行榜上，重点关注Retrieval任务的平均分。同时，注意模型的维度（dim）、大小和支持的语言。
+- **热门模型举例：**
+    - **BGE (BAAI General Embedding):** 由中国智源人工智能研究院开发，长期霸榜，有多种尺寸和语言版本可选，是开源模型的绝佳选择。
+    - **GTE (General Text Embeddings):** 另一个由一线研究机构推出的高性能开源模型。
+    - **OpenAI text-embedding-3-small/large:** 闭源商用模型的标杆，性能强大，使用方便，但有API调用成本。
+
+## **微调嵌入模型 (Fine-tuning)**
+
+通用模型是在维基百科等通用语料上训练的，可能无法理解你公司内部的专有术语或“黑话”（例如，一个项目代号Project Phoenix在通用模型看来可能与神话有关，但在你公司内部明确指向某个软件）。微调（Fine-tuning）就是用你自己的数据，对预训练好的嵌入模型进行“再教育”，让它成为理解你特定领域语言的专家。
+
+- **核心思想——对比学习：**
+    - **类比：** 这就像是在训练一只**警犬**。你给它闻一下嫌疑人的**手套（anchor）**，然后告诉它，这个人穿过的鞋子（positive）是“好”的，应该去追；而另一个人用过的杯子（negative）是“坏”的，应该忽略。通过反复训练，警犬就学会了只追踪与嫌疑人相关的气味。
+    - **训练数据：** 通常是三元组（Triplets）：(anchor, positive, negative)。anchor是查询或文本样本，positive是相关的文本，negative是不相关的文本。
+- **实践中的数据集构建策略：**
+    - **来自用户行为日志：** 这是最高质量的数据来源之一。例如，在电商搜索场景中，用户点击并购买的商品（positive）相比于那些曝光了但未被点击的商品（negative），构成了天然的训练样本。
+    - **来自现有问答对 (FAQ):** 公司的FAQ页面是极佳的种子数据。问题可以作为anchor，对应的标准答案作为positive。negative可以从其他不相关的问答对中采样。
+    - **LLM合成数据 (需要谨慎):** 如前所述，可以用LLM生成数据，但这需要高质量的Prompt和严格的质量控制，以防模型生成过于简单或模式化的数据，导致微调后的模型过拟合于这种“合成风格”。
+    - **难负样本挖掘 (Hard Negative Mining):**
+        - **概念说明：** 简单的negative样本（如“苹果公司财报” vs. “苹果派食谱”）很容易区分。但要让模型学会细微差别，需要“难负样本”，即那些与anchor主题相关但内容不符的样本（如“苹果Q1财报” vs. “苹果Q2财 ઉ报”）。
+        - **实现方法：** 在训练过程中，可以先用当前模型进行一次检索，将那些被模型**错误地排在靠前位置**的不相关文档，作为下一轮训练的难负样本。这是一种迭代式的自适应训练。
+- **可执行代码示例 (使用sentence-transformers进行微调的数据准备和训练):**
+
+```python
+# 准备环境:
+# pip install sentence-transformers datasets
+
+from sentence_transformers import SentenceTransformer, InputExample, losses
+from torch.utils.data import DataLoader
+from datasets import Dataset
+
+# 1. 准备微调数据集
+# 在真实场景中，这些数据需要通过人工标注或业务日志挖掘得到。
+# 这里我们创建一些简单的例子。
+train_samples_data = {
+    "query": [
+        "What is the capital of France?", 
+        "How does photosynthesis work?"
+    ],
+    "positive_doc": [
+        "Paris is the most populous city and capital of France.",
+        "Photosynthesis is a process used by plants to convert light energy into chemical energy."
+    ],
+    "negative_doc": [
+        "The Eiffel Tower is a famous landmark in Paris.", # 与query相关，但不是直接答案，是一个"hard negative"
+        "The mitochondria is the powerhouse of the cell." # 完全不相关
+    ]
+}
+train_dataset = Dataset.from_dict(train_samples_data)
+
+# 2. 将数据集转换为 sentence-transformers 需要的 InputExample 格式
+train_examples = []
+for i in range(train_dataset.num_rows):
+    example = train_dataset[i]
+    train_examples.append(InputExample(texts=[example['query'], example['positive_doc'], example['negative_doc']]))
+
+# 3. 加载一个预训练模型作为微调的起点
+model_name = 'all-MiniLM-L6-v2'
+print(f"Loading pre-trained model: {model_name}")
+model = SentenceTransformer(model_name)
+
+# 4. 定义数据加载器和损失函数
+# DataLoader负责将数据分批次提供给模型
+train_dataloader = DataLoader(train_examples, shuffle=True, batch_size=2)
+# TripletLoss 是对比学习中经典的三元组损失函数。
+# 它的目标是让 (anchor, positive) 对的距离小于 (anchor, negative) 对的距离。
+train_loss = losses.TripletLoss(model=model)
+
+# 5. 执行微调
+# 在真实项目中，num_epochs通常更大，并需要配置warmup_steps等参数。
+print("Starting fine-tuning...")
+model.fit(train_objectives=[(train_dataloader, train_loss)],
+          epochs=1,
+          warmup_steps=1,
+          output_path='./finetuned_embedding_model', # 微调后的模型保存路径
+          show_progress_bar=True)
+
+print("\nFine-tuning complete. Model saved to './finetuned_embedding_model'")
+
+# 6. (可选) 验证微调效果
+finetuned_model = SentenceTransformer('./finetuned_embedding_model')
+
+query = "What is the capital of France?"
+docs_to_compare = [
+    "Paris is the most populous city and capital of France.", # 正确答案
+    "The Eiffel Tower is a famous landmark in Paris." # 干扰项
+]
+
+query_embedding = finetuned_model.encode(query)
+doc_embeddings = finetuned_model.encode(docs_to_compare)
+
+from sentence_transformers.util import cos_sim
+
+scores = cos_sim(query_embedding, doc_embeddings)
+print(f"\nScores after fine-tuning for query '{query}':")
+print(f"'{docs_to_compare[0]}': {scores[0][0]:.4f}")
+print(f"'{docs_to_compare[1]}': {scores[0][1]:.4f}")
+# 期望看到正确答案的得分显著高于干扰项的得分。
+```
+
+## **多模态嵌入 (Multimodal Embeddings)**
+
+知识不仅仅是文本。图表、图片、甚至音频都包含着丰富的信息。多模态嵌入模型（如OpenAI的CLIP）可以将不同模态的数据（如文本和图像）映射到同一个共享的向量空间中。这就像为全世界的不同语言（文本、图像、声音）发明了一种通用的“**世界语**”（共享向量空间）。一张猫的**图片**和“一只猫”这段**文字**，在这门世界语中会被翻译成几乎相同的“句子”（向量）。
+
+- **应用场景:**
+    - **图文互搜：** 用一句话描述来搜索知识库中的相关图片、图表。
+    - **复杂文档理解：** 将文档中的图片和周围的文本一起嵌入，让系统能理解“如图1所示的系统架构...”这样的内容。
+- **[图片建议]:** 一张图，左边是一张建筑物的图片，右边是一段文字描述“一栋有玻璃幕墙的现代摩天大楼”。从图片和文字分别引出箭头，指向同一个向量点[0.1, 0.8, ...]，图的标题是“多模态嵌入：图文同义”。
+

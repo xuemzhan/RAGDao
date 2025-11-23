@@ -1,0 +1,18 @@
+site_name: RAGDao
+site_description: "一本开源书项目"
+site_author: "Your Name"
+repo_url: "https://github.com/your-name/RAGDao"
+
+nav:
+  - 首页: index.md
+  - 大纲: docs/outline.md
+  - 第 1 章 引言: docs/ch01-intro.md
+
+theme:
+  name: mkdocs
+
+markdown_extensions:
+  - toc:
+      permalink: true
+  - tables
+  - fenced_code
